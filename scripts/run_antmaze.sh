@@ -1,4 +1,6 @@
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/tri/.mujoco/mujoco210/bin:/usr/lib/nvidia
 export D4RL_SUPPRESS_IMPORT_ERROR=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # export CUDA_VISIBLE_DEVICES=0
 # export WANDB_DISABLED=True
 

@@ -146,7 +146,7 @@ def main(argv):
         4. every FLAGS.online_eval_every_n_env_steps for online phase
         5. when replay_buffer.total_steps >= FLAGS.max_online_env_steps to get final fine-tuned performance
         """
-        do_eval = (epoch == 0 or (not is_online and epoch % FLAGS.offline_eval_every_n_epoch == 0) or (epoch == FLAGS.n_pretrain_epochs) or (is_online and replay_buffer.total_steps // FLAGS.online_eval_every_n_env_steps > online_eval_counter) or (replay_buffer.total_steps >= FLAGS.max_online_env_steps))
+        do_eval = (epoch == 0 or epoch == 15 or (not is_online and epoch % FLAGS.offline_eval_every_n_epoch == 0) or (epoch == FLAGS.n_pretrain_epochs) or (is_online and replay_buffer.total_steps // FLAGS.online_eval_every_n_env_steps > online_eval_counter) or (replay_buffer.total_steps >= FLAGS.max_online_env_steps))
             
         with Timer() as eval_timer:
             if do_eval:
@@ -170,7 +170,11 @@ def main(argv):
 
                 if FLAGS.save_model:
                     save_data = {'sac': sac, 'variant': variant, 'epoch': epoch}
-                    wandb_logger.save_pickle(save_data, 'model.pkl')   
+                    wandb_logger.save_pickle(save_data, f'{FLAGS.env}_model.pkl')
+                    if epoch == 15:
+                        wandb_logger.save_pickle(save_data, f'{FLAGS.env}_model_epoch_15.pkl')
+                    if epoch == FLAGS.n_pretrain_epochs:
+                        wandb_logger.save_pickle(save_data, f'{FLAGS.env}_model_pretrained.pkl')
     
         metrics['grad_steps'] = total_grad_steps
         if is_online:

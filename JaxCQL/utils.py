@@ -50,7 +50,7 @@ class WandBLogger(object):
         config.experiment_id = config_dict.placeholder(str)
         config.anonymous = config_dict.placeholder(str)
         config.notes = config_dict.placeholder(str)
-        config.entity = None
+        config.entity = 'deepbk'
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -94,8 +94,16 @@ class WandBLogger(object):
             os.environ["WANDB_MODE"] = "run"
             self.config.online = False
 
+        env_name = self._variant.get('env', 'unknown')
+        enable_calql = str(self._variant.get('enable_calql', False)).lower()
+        
+        run_name = f"calql-{enable_calql}_{uuid.uuid4().hex[:4]}"
         self.run = wandb.init(
             reinit=True,
+            name=run_name,
+            group=env_name,
+            job_type=f"enable_calql: {enable_calql}",
+            tags=[env_name, f"calql-{enable_calql}"],
             config=self._variant,
             project=self.config.project,
             dir=self.config.output_dir,

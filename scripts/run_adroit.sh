@@ -1,5 +1,7 @@
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/tri/.mujoco/mujoco210/bin:/usr/lib/nvidia
 export D4RL_SUPPRESS_IMPORT_ERROR=1
-# export CUDA_VISIBLE_DEVICES=0
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export CUDA_VISIBLE_DEVICES=0
 # export WANDB_DISABLED=True
 
 env=pen-binary-v0
@@ -14,9 +16,12 @@ fi
 
 XLA_PYTHON_CLIENT_PREALLOCATE=false python -m JaxCQL.conservative_sac_main \
     --env=$env \
+    --save_model=True \
+    --logging.output_dir="./saved_models" \
     --logging.online \
     --seed=0 \
     --logging.project=Cal-QL-exapmle \
+    --save_model=True \
     --cql_min_q_weight=1.0 \
     --policy_arch=512-512 \
     --qf_arch=512-512-512 \

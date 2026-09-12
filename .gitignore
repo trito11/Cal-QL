@@ -139,4 +139,10 @@ cython_debug/
 
 JaxCQL/wandb_config.py
 demonstrations/
+mj_envs/offpolicy_hand_data.zip
+saved_models/
+*.code-workspace
+offpolicy_hand_data.zip
+saved_models/
 mj_envs/
+*.code-workspace

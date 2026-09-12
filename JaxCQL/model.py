@@ -7,6 +7,11 @@ import flax
 from flax import linen as nn
 import distrax
 
+# Compatibility shim: nn.nowrap was added in flax 0.3.5
+if not hasattr(nn, 'nowrap'):
+    nn.nowrap = lambda fn: fn
+
+
 from .jax_utils import extend_and_repeat, next_rng, JaxRNG
 
 
