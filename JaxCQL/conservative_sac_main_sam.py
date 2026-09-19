@@ -75,6 +75,8 @@ FLAGS_DEF = define_flags_with_default(
     use_uncertainty_sam=False, # Scale rho by epistemic uncertainty |Q1 - Q2|
     uncertainty_scale=10.0,    # Normalization scale for Q-disagreement
     v_offline_only_online=False, # Train V_psi strictly on offline dataset transitions during online
+    use_actor_sam=False,       # Enable Actor-level Robust Policy SAM
+    actor_rho=0.02,            # Perturbation radius for Actor SAM
     run_id=0,
     run_label='CalQL-Expectile-ActionSAM',
 
@@ -105,6 +107,8 @@ def main(argv):
     variant['use_uncertainty_sam'] = FLAGS.use_uncertainty_sam
     variant['uncertainty_scale'] = FLAGS.uncertainty_scale
     variant['v_offline_only_online'] = FLAGS.v_offline_only_online
+    variant['use_actor_sam'] = FLAGS.use_actor_sam
+    variant['actor_rho'] = FLAGS.actor_rho
 
     # ── WandB logger setup ────────────────────────────────────────────────
     import wandb, uuid, os
@@ -366,6 +370,7 @@ def main(argv):
                 current_use_adv = FLAGS.use_adv_action and (epoch >= FLAGS.sam_start_epoch)
                 current_rho = float(FLAGS.rho)
                 offline_batch_size_arg = -1
+            current_use_actor_sam = FLAGS.use_actor_sam and (epoch >= FLAGS.sam_start_epoch)
 
             step_metrics_accum = []
             for _ in range(int(n_train_step_per_epoch)):
@@ -389,6 +394,8 @@ def main(argv):
                         use_uncertainty_sam=FLAGS.use_uncertainty_sam,
                         uncertainty_scale=FLAGS.uncertainty_scale,
                         offline_batch_size=offline_batch_size_arg,
+                        use_actor_sam=current_use_actor_sam,
+                        actor_rho=FLAGS.actor_rho,
                     ),
                     'sac'
                 )

@@ -92,6 +92,8 @@ class ConservativeSAC_SAM(object):
         config.use_adv_action = True   # Enable action-space SAM perturbation
         config.use_uncertainty_sam = False # Scale rho by epistemic uncertainty |Q1 - Q2|
         config.uncertainty_scale = 10.0    # Normalization scale for Q-disagreement
+        config.use_actor_sam = False       # Enable Actor-level Robust Policy SAM
+        config.actor_rho = 0.02            # Perturbation radius for Actor SAM
         config.vf_arch = '256-256'    # Architecture for V_psi(s)
         config.orthogonal_init = False
 
@@ -196,7 +198,8 @@ class ConservativeSAC_SAM(object):
     def train(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False,
               use_adv_action=None, rho=None, tau=None,
               use_uncertainty_sam=None, uncertainty_scale=None,
-              offline_batch_size=-1):
+              offline_batch_size=-1,
+              use_actor_sam=None, actor_rho=None):
         """Public train interface."""
         self._total_steps += 1
         if use_adv_action is None:
@@ -209,22 +212,28 @@ class ConservativeSAC_SAM(object):
             use_uncertainty_sam = getattr(self.config, 'use_uncertainty_sam', False)
         if uncertainty_scale is None:
             uncertainty_scale = getattr(self.config, 'uncertainty_scale', 10.0)
+        if use_actor_sam is None:
+            use_actor_sam = getattr(self.config, 'use_actor_sam', False)
+        if actor_rho is None:
+            actor_rho = getattr(self.config, 'actor_rho', 0.02)
 
         self._train_states, self._target_qf_params, metrics = self._train_step(
             self._train_states, self._target_qf_params, next_rng(), batch,
             bool(use_cql), jnp.float32(cql_min_q_weight), bool(enable_calql),
             bool(use_adv_action), jnp.float32(rho), jnp.float32(tau),
             bool(use_uncertainty_sam), jnp.float32(uncertainty_scale),
-            jnp.int32(offline_batch_size)
+            jnp.int32(offline_batch_size),
+            bool(use_actor_sam), jnp.float32(actor_rho)
         )
         return metrics
 
-    @partial(jax.jit, static_argnames=('self', 'use_cql', 'enable_calql', 'use_adv_action', 'use_uncertainty_sam'))
+    @partial(jax.jit, static_argnames=('self', 'use_cql', 'enable_calql', 'use_adv_action', 'use_uncertainty_sam', 'use_actor_sam'))
     def _train_step(self, train_states, target_qf_params, rng, batch,
                     use_cql=True, cql_min_q_weight=5.0, enable_calql=False,
                     use_adv_action=True, rho=0.05, tau=0.8,
                     use_uncertainty_sam=False, uncertainty_scale=10.0,
-                    offline_batch_size=-1):
+                    offline_batch_size=-1,
+                    use_actor_sam=False, actor_rho=0.02):
         rng_generator = JaxRNG(rng)
 
         def loss_fn(train_params):
@@ -272,12 +281,32 @@ class ConservativeSAC_SAM(object):
                 alpha = self.config.alpha_multiplier
 
             # ─────────────────────────────────────────────────────────────
-            # 2. Policy Loss
+            # 2. Policy Loss (with optional Actor-SAM Robust Perturbation)
             # ─────────────────────────────────────────────────────────────
-            q_new_actions = jnp.minimum(
-                forward_qf(train_params['qf1'], observations, new_actions),
-                forward_qf(train_params['qf2'], observations, new_actions),
-            )
+            if use_actor_sam:
+                def q_actor_sum(a):
+                    q1 = forward_qf(train_params['qf1'], observations, a)
+                    q2 = forward_qf(train_params['qf2'], observations, a)
+                    return jnp.sum(jnp.minimum(q1, q2))
+
+                grad_a = jax.grad(q_actor_sum)(new_actions)
+                norm_a = jnp.linalg.norm(grad_a, axis=-1, keepdims=True) + 1e-8
+                delta_worst = -actor_rho * (grad_a / norm_a)
+                delta_worst = jax.lax.stop_gradient(delta_worst)
+                a_robust = jnp.clip(new_actions + delta_worst, -1.0, 1.0)
+
+                q_new_actions = jnp.minimum(
+                    forward_qf(train_params['qf1'], observations, a_robust),
+                    forward_qf(train_params['qf2'], observations, a_robust),
+                )
+                actor_adv_norm = jnp.mean(jnp.linalg.norm(delta_worst, axis=-1))
+            else:
+                q_new_actions = jnp.minimum(
+                    forward_qf(train_params['qf1'], observations, new_actions),
+                    forward_qf(train_params['qf2'], observations, new_actions),
+                )
+                actor_adv_norm = 0.0
+
             policy_loss = (alpha * log_pi - q_new_actions).mean()
             loss_collection['policy'] = policy_loss
 
@@ -522,6 +551,9 @@ class ConservativeSAC_SAM(object):
             uncertainty_disagreement_mean=jnp.mean(aux_values['disagreement']) if use_cql else jnp.zeros(()),
             rho_effective_mean=jnp.mean(aux_values['rho_eff']) if (use_cql and use_adv_action) else jnp.zeros(()),
             v_offline_mask_ratio=jnp.mean(aux_values['mask_v']),
+            use_actor_sam=int(use_actor_sam),
+            actor_rho=actor_rho,
+            actor_adv_norm=aux_values['actor_adv_norm'],
         )
 
         if use_cql:

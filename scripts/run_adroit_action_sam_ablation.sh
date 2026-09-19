@@ -13,6 +13,8 @@
 #   Run 5 [Ablation-UncertaintySAM]: + Uncertainty-Aware SAM (|Q1 - Q2|)
 #   Run 6 [Full-Combined-AntiDip] : TỔNG HỢP TOÀN BỘ (Dynamic Mixing + Protected V +
 #                                   Uncertainty SAM + Online Decay + Warmup + CQL Online 0.2)
+#   Run 7 [ActorCritic-SAM-Boost] : BỨT PHÁ VƯỢT CAL-QL (Actor-SAM robust policy +
+#                                   Sweet-Spot Critic SAM rho_online=0.03 + Anti-Dip)
 # =============================================================================
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/tri/.mujoco/mujoco210/bin:/usr/lib/nvidia
@@ -169,7 +171,30 @@ if [ "$TARGET_RUN" = "all" ] || [ "$TARGET_RUN" = "6" ]; then
         --cql_min_q_weight_online=0.2
 fi
 
+# ── Run 7: Actor-Critic Action-SAM Boost (BỨT PHÁ VƯỢT CAL-QL) ────────────────
+# Kết hợp:
+# - Critic SAM ở Sweet-Spot: rho_online=0.03, uncertainty_scale=2.5 (rho_eff ~ 0.02)
+# - Actor-SAM: use_actor_sam=True, actor_rho=0.02 (tối ưu Policy trên flat plateaus)
+# - Toàn bộ nền tảng Anti-Dip: Protected V_psi, Dynamic Mixing, CQL Online 0.2
+if [ "$TARGET_RUN" = "all" ] || [ "$TARGET_RUN" = "7" ]; then
+    run_experiment 7 "R7-ActorCritic-ActionSAM-Boost" \
+        --use_adv_action=True \
+        --sam_start_epoch=10 \
+        --rho=0.05 \
+        --rho_online=0.03 \
+        --sam_rho_decay=True \
+        --use_uncertainty_sam=True \
+        --uncertainty_scale=2.5 \
+        --v_offline_only_online=True \
+        --tau=0.8 \
+        --mixing_ratio=-1.0 \
+        --cql_min_q_weight_online=0.2 \
+        --use_actor_sam=True \
+        --actor_rho=0.02
+fi
+
 echo ""
 echo "========================================================================"
 echo "  ABLATION STUDY SUITE COMPLETED!"
 echo "========================================================================"
+

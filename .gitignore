@@ -146,3 +146,4 @@ offpolicy_hand_data.zip
 saved_models/
 mj_envs/
 *.code-workspace
+scratch/
