@@ -1,14 +1,10 @@
 """
-SAM Ablation Study Main — chạy từ đầu, 5 runs so sánh
-=======================================================
-New file — does NOT modify conservative_sac_main.py.
-
-Run mapping:
-  Run 0  Baseline CalQL      : use_sam=False
-  Run 1  Naive SAM           : use_sam=True, sam_start_ratio=0.0, rho_schedule=fixed
-  Run 2  Late-Stage SAM      : use_sam=True, sam_start_ratio=0.8, rho_schedule=fixed
-  Run 3  Adaptive Radius SAM : use_sam=True, sam_start_ratio=0.0, rho_schedule=cosine_decay
-  Run 4  Combined (1+2)      : use_sam=True, sam_start_ratio=0.8, rho_schedule=cosine_decay
+Cal-QL with Dynamic Expectile Value Network & Action-Space SAM
+=============================================================
+Main experiment entry point for Cal-QL refactored:
+- Expectile Value Network V(s) replacing static V_ref (IQL style).
+- Action-space SAM perturbation a* in Cal-QL regularizer.
+- Strict Bellman target protection with real dataset pairs.
 """
 
 import numpy as np
@@ -20,7 +16,6 @@ import absl.app
 import absl.flags
 
 from .conservative_sac_sam import ConservativeSAC_SAM
-from .sam_optimizer import SAMRhoScheduler
 from .replay_buffer import (
     subsample_batch, concatenate_batches,
     get_hand_dataset_with_mc_calculation, ReplayBuffer
@@ -70,9 +65,20 @@ FLAGS_DEF = define_flags_with_default(
     n_online_traj_per_epoch=1,
     online_utd_ratio=1,
 
-    # ── SAM flags ──────────────────────────────────────────────────────────
+    # ── Cal-QL with Expectile Value Network & Action SAM flags ────────────
+    tau=0.8,                   # Expectile loss parameter tau in (0, 1)
+    rho=0.05,                  # Adversarial action perturbation radius rho (offline)
+    rho_online=-1.0,           # SAM radius in online phase (-1.0 to use rho)
+    sam_rho_decay=False,       # Linearly decay rho during online phase down to rho_online (or 0)
+    sam_start_epoch=0,         # Start applying SAM at or after this offline epoch (e.g. 10 for warmup)
+    use_adv_action=True,       # Enable adversarial action perturbation
+    use_uncertainty_sam=False, # Scale rho by epistemic uncertainty |Q1 - Q2|
+    uncertainty_scale=10.0,    # Normalization scale for Q-disagreement
+    v_offline_only_online=False, # Train V_psi strictly on offline dataset transitions during online
     run_id=0,
-    run_label='R0-Baseline-CalQL',    # dùng làm tên WandB run
+    run_label='CalQL-Expectile-ActionSAM',
+
+    # Backwards compatibility flags
     use_sam=False,
     sam_target='both',
     sam_start_ratio=0.8,
@@ -90,21 +96,26 @@ def main(argv):
     FLAGS = absl.flags.FLAGS
     variant = get_user_flags(FLAGS, FLAGS_DEF)
     variant['run_label'] = FLAGS.run_label
+    variant['tau'] = FLAGS.tau
+    variant['rho'] = FLAGS.rho
+    variant['rho_online'] = FLAGS.rho_online
+    variant['sam_rho_decay'] = FLAGS.sam_rho_decay
+    variant['sam_start_epoch'] = FLAGS.sam_start_epoch
+    variant['use_adv_action'] = FLAGS.use_adv_action
+    variant['use_uncertainty_sam'] = FLAGS.use_uncertainty_sam
+    variant['uncertainty_scale'] = FLAGS.uncertainty_scale
+    variant['v_offline_only_online'] = FLAGS.v_offline_only_online
 
-    # ── WandB: tên run rõ ràng theo ablation label ─────────────────────────
-    # Override prefix để tên project = "Cal-QL-SAM-Ablation--<project>"
-    # Tên run (trong WandB UI) = run_label, group = env
+    # ── WandB logger setup ────────────────────────────────────────────────
     import wandb, uuid, os
     from .utils import WandBLogger
 
-    # Patch WandBLogger để set run name = run_label
     _orig_init = WandBLogger.__init__
 
     def _patched_init(self, config, variant):
         from copy import copy
         import tempfile
         from socket import gethostname
-        from ml_collections import ConfigDict
 
         self.config = self.get_default_config(config)
         if self.config.experiment_id is None:
@@ -134,15 +145,15 @@ def main(argv):
             os.environ['WANDB_MODE'] = 'run'
             self.config.online = False
 
-        run_name = variant.get('run_label', 'unknown')   # ← tên rõ ràng
+        run_name = variant.get('run_label', 'unknown')
         env_name = variant.get('env', 'unknown')
 
         self.run = wandb.init(
             reinit=True,
-            name=run_name,                               # ← hiển thị trong UI
+            name=run_name,
             group=env_name,
             job_type=run_name,
-            tags=[env_name, run_name],
+            tags=[env_name, run_name, f"tau={FLAGS.tau}", f"rho={FLAGS.rho}"],
             config=self._variant,
             project=self.config.project,
             dir=self.config.output_dir,
@@ -168,12 +179,12 @@ def main(argv):
         include_exp_prefix_sub_dir=False
     )
 
-    print(f"\n{'='*60}")
-    print(f"  SAM Ablation  run_id={FLAGS.run_id}  label={FLAGS.run_label}")
-    print(f"  use_sam={FLAGS.use_sam}  schedule={FLAGS.sam_rho_schedule}")
-    print(f"  sam_start_ratio={FLAGS.sam_start_ratio}")
-    print(f"  rho_max={FLAGS.sam_rho_max}  rho_min={FLAGS.sam_rho_min}")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*70}")
+    print(f"  Cal-QL: Dynamic Expectile Value Network & Action-Space SAM")
+    print(f"  run_label={FLAGS.run_label}  seed={FLAGS.seed}")
+    print(f"  tau={FLAGS.tau}  rho={FLAGS.rho}  use_adv_action={FLAGS.use_adv_action}")
+    print(f"  enable_calql={FLAGS.enable_calql}  use_cql={FLAGS.use_cql}")
+    print(f"{'='*70}\n")
 
     # ── Dataset + Env ─────────────────────────────────────────────────────
     import mj_envs
@@ -187,7 +198,7 @@ def main(argv):
 
     set_random_seed(FLAGS.seed)
     eval_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, use_goal=True,
-                               gamma=FLAGS.cql.discount)
+                                gamma=FLAGS.cql.discount)
     train_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, use_goal=True,
                                 use_mc=True, gamma=FLAGS.cql.discount,
                                 reward_scale=FLAGS.reward_scale,
@@ -207,24 +218,15 @@ def main(argv):
         FLAGS.cql.target_entropy = -np.prod(
             eval_sampler.env.action_space.shape).item()
 
+    # Pass tau, rho, use_adv_action, and anti-dip flags into cql config
+    FLAGS.cql.tau = FLAGS.tau
+    FLAGS.cql.rho = FLAGS.rho
+    FLAGS.cql.use_adv_action = FLAGS.use_adv_action
+    FLAGS.cql.use_uncertainty_sam = FLAGS.use_uncertainty_sam
+    FLAGS.cql.uncertainty_scale = FLAGS.uncertainty_scale
+
     sac = ConservativeSAC_SAM(FLAGS.cql, policy, qf)
     sampler_policy = SamplerPolicy(sac.policy, sac.train_params['policy'])
-
-    # ── SAM scheduler ─────────────────────────────────────────────────────
-    total_offline_steps = FLAGS.n_pretrain_epochs * FLAGS.n_train_step_per_epoch_offline
-    sam_start_step = int(FLAGS.sam_start_ratio * total_offline_steps)
-    rho_scheduler = SAMRhoScheduler(
-        mode=FLAGS.sam_rho_schedule,
-        rho_fixed=FLAGS.sam_rho_max,
-        rho_max=FLAGS.sam_rho_max,
-        rho_min=FLAGS.sam_rho_min,
-        gamma=FLAGS.sam_gamma,
-        start_step=sam_start_step,
-        end_step=total_offline_steps,
-    )
-    print(f"[SAM] total_offline_steps={total_offline_steps}  "
-          f"sam_start_step={sam_start_step} "
-          f"({'SAM never' if not FLAGS.use_sam else f'SAM from step {sam_start_step}'})")
 
     # ── Training loop ─────────────────────────────────────────────────────
     viskit_metrics = {}
@@ -242,7 +244,6 @@ def main(argv):
     epoch                 = 0
     train_metrics         = None
     expl_metrics          = None
-    sam_extra_time_total  = 0.0
     online_td_losses      = []
 
     while True:
@@ -285,7 +286,6 @@ def main(argv):
             'run_label': FLAGS.run_label,
             'grad_steps': total_grad_steps,
             'epoch': epoch,
-            'sam/total_extra_time_sec': sam_extra_time_total,
             'online_rollout_time': 0 if online_rollout_timer is None else online_rollout_timer(),
             'train_time':          0 if train_timer is None else train_timer(),
             'eval_time':           eval_timer(),
@@ -335,7 +335,7 @@ def main(argv):
                 }
 
         if train_timer is None:
-            print(f"[{FLAGS.run_label}] JIT compiling…")
+            print(f"[{FLAGS.run_label}] JIT compiling...")
 
         with Timer() as train_timer:
             if epoch >= FLAGS.n_pretrain_epochs and FLAGS.online_utd_ratio > 0:
@@ -352,6 +352,21 @@ def main(argv):
             batch_size_offline = int(FLAGS.batch_size * mixing_ratio)
             batch_size_online  = FLAGS.batch_size - batch_size_offline
 
+            # Determine dynamic SAM parameters and protected V status
+            if is_online:
+                target_rho = FLAGS.rho_online if FLAGS.rho_online >= 0.0 else FLAGS.rho
+                if FLAGS.sam_rho_decay:
+                    progress = min(1.0, replay_buffer.total_steps / float(FLAGS.max_online_env_steps))
+                    current_rho = float(FLAGS.rho - progress * (FLAGS.rho - target_rho))
+                else:
+                    current_rho = float(target_rho)
+                current_use_adv = FLAGS.use_adv_action and (current_rho > 0.0)
+                offline_batch_size_arg = batch_size_offline if FLAGS.v_offline_only_online else -1
+            else:
+                current_use_adv = FLAGS.use_adv_action and (epoch >= FLAGS.sam_start_epoch)
+                current_rho = float(FLAGS.rho)
+                offline_batch_size_arg = -1
+
             step_metrics_accum = []
             for _ in range(int(n_train_step_per_epoch)):
                 if is_online:
@@ -362,31 +377,21 @@ def main(argv):
                 else:
                     batch = batch_to_jax(subsample_batch(dataset, FLAGS.batch_size))
 
-                # SAM hanya aktif di offline phase
-                use_sam_now = (
-                    FLAGS.use_sam
-                    and not is_online
-                    and total_grad_steps >= sam_start_step
+                step_m = prefix_metrics(
+                    sac.train(
+                        batch,
+                        use_cql=use_cql,
+                        cql_min_q_weight=cql_min_q_weight,
+                        enable_calql=enable_calql,
+                        use_adv_action=current_use_adv,
+                        rho=current_rho,
+                        tau=FLAGS.tau,
+                        use_uncertainty_sam=FLAGS.use_uncertainty_sam,
+                        uncertainty_scale=FLAGS.uncertainty_scale,
+                        offline_batch_size=offline_batch_size_arg,
+                    ),
+                    'sac'
                 )
-
-                if use_sam_now:
-                    t0 = time.time()
-                    current_rho = rho_scheduler.get_rho(total_grad_steps)
-                    step_m = prefix_metrics(
-                        sac.train(batch, use_cql=use_cql,
-                                  cql_min_q_weight=cql_min_q_weight,
-                                  enable_calql=enable_calql,
-                                  use_sam=True, sam_rho=current_rho,
-                                  sam_target=FLAGS.sam_target),
-                        'sac')
-                    sam_extra_time_total += time.time() - t0
-                else:
-                    step_m = prefix_metrics(
-                        sac.train(batch, use_cql=use_cql,
-                                  cql_min_q_weight=cql_min_q_weight,
-                                  enable_calql=enable_calql,
-                                  use_sam=False),
-                        'sac')
 
                 step_metrics_accum.append(step_m)
                 total_grad_steps += 1
