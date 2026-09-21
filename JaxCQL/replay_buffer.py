@@ -11,6 +11,10 @@ ENV_CONFIG = {
     "adroit-binary": {
         "reward_pos": 0.0,
         "reward_neg": -1.0,
+    },
+    "kitchen": {
+        "reward_pos": 1.0,
+        "reward_neg": 0.0,
     }
 }
 
@@ -106,7 +110,7 @@ class ReplayBuffer(object):
 
 # based on https://github.com/Farama-Foundation/D4RL/blob/master/d4rl/__init__.py
 def get_d4rl_dataset_with_mc_calculation(env, reward_scale, reward_bias, clip_action, gamma):
-    if "antmaze" in env:
+    if "antmaze" in env or "kitchen" in env:
         is_sparse_reward=True
     else:
         raise NotImplementedError
@@ -271,6 +275,8 @@ def calc_return_to_go(env_name, rewards, terminals, gamma, reward_scale, reward_
     
     if "antmaze" in env_name:
         reward_neg = ENV_CONFIG["antmaze"]["reward_neg"] * reward_scale + reward_bias
+    elif "kitchen" in env_name:
+        reward_neg = ENV_CONFIG["kitchen"]["reward_neg"] * reward_scale + reward_bias
     elif env_name in ["pen-binary-v0", "door-binary-v0", "relocate-binary-v0", "pen-binary", "door-binary", "relocate-binary"]:
         reward_neg = ENV_CONFIG["adroit-binary"]["reward_neg"] * reward_scale + reward_bias
     else:

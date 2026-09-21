@@ -8,19 +8,20 @@ env=pen-binary-v0
 # env=door-binary-v0
 # env=relocate-binary-v0
 
+PYTHON=/home/tri/miniconda3/envs/Cal-QL/bin/python
+
 if [ "$env" = "pen-binary-v0" ]; then
-    max_online_env_steps=2e5
+    max_online_env_steps=${1:-"5e4"}
 elif [ "$env" = "door-binary-v0" ] || [ "$env" = "relocate-binary-v0" ]; then
     max_online_env_steps=1e6
 fi
 
-XLA_PYTHON_CLIENT_PREALLOCATE=false python -m JaxCQL.conservative_sac_main \
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false $PYTHON -m JaxCQL.conservative_sac_main \
     --env=$env \
-    --save_model=True \
     --logging.output_dir="./saved_models" \
     --logging.online \
     --seed=0 \
-    --logging.project=Cal-QL-exapmle \
+    --logging.project=Cal-QL-Baseline \
     --save_model=True \
     --cql_min_q_weight=1.0 \
     --policy_arch=512-512 \

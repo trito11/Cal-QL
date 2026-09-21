@@ -18,7 +18,9 @@ import absl.flags
 from .conservative_sac_sam import ConservativeSAC_SAM
 from .replay_buffer import (
     subsample_batch, concatenate_batches,
-    get_hand_dataset_with_mc_calculation, ReplayBuffer
+    get_hand_dataset_with_mc_calculation,
+    get_d4rl_dataset_with_mc_calculation,
+    ReplayBuffer
 )
 from .jax_utils import batch_to_jax
 from .model import TanhGaussianPolicy, FullyConnectedQFunction, SamplerPolicy
@@ -76,7 +78,11 @@ FLAGS_DEF = define_flags_with_default(
     uncertainty_scale=10.0,    # Normalization scale for Q-disagreement
     v_offline_only_online=False, # Train V_psi strictly on offline dataset transitions during online
     use_actor_sam=False,       # Enable Actor-level Robust Policy SAM
-    actor_rho=0.02,            # Perturbation radius for Actor SAM
+    actor_sam_start_epoch=20,  # Epoch to start Actor-SAM (default 20 for online only, preserving expert offline)
+    actor_rho=0.02,            # Initial Actor-SAM radius
+    actor_rho_online=-1.0,     # Online target Actor-SAM radius (-1.0 to use actor_rho)
+    actor_rho_decay=False,     # Linearly decay actor_rho during online phase down to actor_rho_online
+    use_v_ref=False,           # Monotonic V_ref Dual Anchor: freeze V_psi at end of offline as lower bound
     run_id=0,
     run_label='CalQL-Expectile-ActionSAM',
 
@@ -108,7 +114,11 @@ def main(argv):
     variant['uncertainty_scale'] = FLAGS.uncertainty_scale
     variant['v_offline_only_online'] = FLAGS.v_offline_only_online
     variant['use_actor_sam'] = FLAGS.use_actor_sam
+    variant['actor_sam_start_epoch'] = FLAGS.actor_sam_start_epoch
     variant['actor_rho'] = FLAGS.actor_rho
+    variant['actor_rho_online'] = FLAGS.actor_rho_online
+    variant['actor_rho_decay'] = FLAGS.actor_rho_decay
+    variant['use_v_ref'] = FLAGS.use_v_ref
 
     # ── WandB logger setup ────────────────────────────────────────────────
     import wandb, uuid, os
@@ -191,19 +201,27 @@ def main(argv):
     print(f"{'='*70}\n")
 
     # ── Dataset + Env ─────────────────────────────────────────────────────
-    import mj_envs
-    dataset = get_hand_dataset_with_mc_calculation(
-        FLAGS.env, gamma=FLAGS.cql.discount,
-        reward_scale=FLAGS.reward_scale,
-        reward_bias=FLAGS.reward_bias,
-        clip_action=FLAGS.clip_action
-    )
+    if FLAGS.env in ["pen-binary-v0", "door-binary-v0", "relocate-binary-v0"]:
+        import mj_envs
+        dataset = get_hand_dataset_with_mc_calculation(
+            FLAGS.env, gamma=FLAGS.cql.discount,
+            reward_scale=FLAGS.reward_scale,
+            reward_bias=FLAGS.reward_bias,
+            clip_action=FLAGS.clip_action
+        )
+        use_goal = True
+    else:
+        dataset = get_d4rl_dataset_with_mc_calculation(
+            FLAGS.env, FLAGS.reward_scale, FLAGS.reward_bias,
+            FLAGS.clip_action, gamma=FLAGS.cql.discount
+        )
+        use_goal = False
     assert dataset['next_observations'].shape == dataset['observations'].shape
 
     set_random_seed(FLAGS.seed)
-    eval_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, use_goal=True,
+    eval_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, use_goal=use_goal,
                                 gamma=FLAGS.cql.discount)
-    train_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, use_goal=True,
+    train_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, use_goal=use_goal,
                                 use_mc=True, gamma=FLAGS.cql.discount,
                                 reward_scale=FLAGS.reward_scale,
                                 reward_bias=FLAGS.reward_bias)
@@ -255,6 +273,9 @@ def main(argv):
 
         if epoch == FLAGS.n_pretrain_epochs:
             is_online = True
+            if FLAGS.use_v_ref:
+                print(">>> Freezing V_psi weights at end of offline phase as Monotonic V_ref reference anchor! <<<")
+                sac.freeze_v_ref()
             if FLAGS.cql_min_q_weight_online >= 0:
                 cql_min_q_weight = FLAGS.cql_min_q_weight_online
             if not FLAGS.online_use_cql and use_cql:
@@ -279,8 +300,12 @@ def main(argv):
                     [np.sum(t['rewards']) for t in trajs])
                 metrics['evaluation/average_traj_length'] = np.mean(
                     [len(t['rewards']) for t in trajs])
-                metrics['evaluation/goal_achieved_rate'] = np.mean(
-                    [1 in t['goal_achieved'] for t in trajs])
+                if use_goal:
+                    metrics['evaluation/goal_achieved_rate'] = np.mean(
+                        [1 in t['goal_achieved'] for t in trajs])
+                else:
+                    metrics['evaluation/average_normalized_return'] = np.mean(
+                        [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs])
                 if is_online:
                     online_eval_counter = (replay_buffer.total_steps
                                            // FLAGS.online_eval_every_n_env_steps)
@@ -334,9 +359,13 @@ def main(argv):
                         [np.sum(t['rewards']) for t in trajs]),
                     'exploration/average_traj_length': np.mean(
                         [len(t['rewards']) for t in trajs]),
-                    'exploration/goal_achieved_rate': np.mean(
-                        [1 in t['goal_achieved'] for t in trajs]),
                 }
+                if use_goal:
+                    expl_metrics['exploration/goal_achieved_rate'] = np.mean(
+                        [1 in t['goal_achieved'] for t in trajs])
+                else:
+                    expl_metrics['exploration/average_normalized_return'] = np.mean(
+                        [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs])
 
         if train_timer is None:
             print(f"[{FLAGS.run_label}] JIT compiling...")
@@ -366,11 +395,22 @@ def main(argv):
                     current_rho = float(target_rho)
                 current_use_adv = FLAGS.use_adv_action and (current_rho > 0.0)
                 offline_batch_size_arg = batch_size_offline if FLAGS.v_offline_only_online else -1
+
+                # Actor SAM schedule
+                target_actor_rho = FLAGS.actor_rho_online if FLAGS.actor_rho_online >= 0.0 else FLAGS.actor_rho
+                if FLAGS.actor_rho_decay:
+                    progress = min(1.0, replay_buffer.total_steps / float(FLAGS.max_online_env_steps))
+                    current_actor_rho = float(FLAGS.actor_rho - progress * (FLAGS.actor_rho - target_actor_rho))
+                else:
+                    current_actor_rho = float(target_actor_rho)
+                current_use_actor_sam = FLAGS.use_actor_sam and (epoch >= FLAGS.actor_sam_start_epoch) and (current_actor_rho > 0.0)
             else:
                 current_use_adv = FLAGS.use_adv_action and (epoch >= FLAGS.sam_start_epoch)
                 current_rho = float(FLAGS.rho)
                 offline_batch_size_arg = -1
-            current_use_actor_sam = FLAGS.use_actor_sam and (epoch >= FLAGS.sam_start_epoch)
+
+                current_actor_rho = float(FLAGS.actor_rho)
+                current_use_actor_sam = FLAGS.use_actor_sam and (epoch >= FLAGS.actor_sam_start_epoch)
 
             step_metrics_accum = []
             for _ in range(int(n_train_step_per_epoch)):
@@ -395,7 +435,8 @@ def main(argv):
                         uncertainty_scale=FLAGS.uncertainty_scale,
                         offline_batch_size=offline_batch_size_arg,
                         use_actor_sam=current_use_actor_sam,
-                        actor_rho=FLAGS.actor_rho,
+                        actor_rho=current_actor_rho,
+                        use_v_ref=(is_online and FLAGS.use_v_ref),
                     ),
                     'sac'
                 )

@@ -74,8 +74,17 @@ $ bash scripts/run_adroit.sh
 ```
 Please check [scripts/run_adroit.sh](scripts/run_adroit.sh) for the details.
 
-### Other Environments
-At the moment, this repository only has AntMaze and Adroit implemented. FrankaKitchen is planned to be added soon, but if you are in a hurry or would like to try other tasks (such as the visual manipulation domain in the paper), please contact me at nakamoto\[at\]berkeley\[dot\]edu.
+### Franka Kitchen
+Franka Kitchen is fully integrated and supported:
+- **Environments:** `kitchen-complete-v0`, `kitchen-partial-v0`, `kitchen-mixed-v0`
+- Run Cal-QL baseline on Kitchen:
+```bash
+$ bash scripts/run_kitchen.sh kitchen-complete-v0 0
+```
+- Run Franka Kitchen with SAM + V_ref Anchor:
+```bash
+$ bash scripts/run_kitchen_sam.sh kitchen-complete-v0 1 true true 0.05
+```
 
 ## Sample Runs and Logs
 In order to enable other readers to replicate our results easily, we have conducted a sweep for Cal-QL and CQL in the AntMaze and Adroit domains and made the corresponding W&B logs publicly accessible. The logs can be found here: https://wandb.ai/mitsuhiko/Cal-QL--Examples?workspace=user-mitsuhiko

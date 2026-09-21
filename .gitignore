@@ -147,3 +147,5 @@ saved_models/
 mj_envs/
 *.code-workspace
 scratch/
+.idea/
+*:Zone.Identifier
